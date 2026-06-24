@@ -65,9 +65,24 @@
   .cog{position:absolute;top:calc(env(safe-area-inset-top) + 14px);right:18px;
     background:none;border:none;color:var(--dim);font-size:20px;padding:6px;cursor:pointer}
   .title{font-size:15px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}
-  .big{font-size:clamp(60px,24vw,128px);font-weight:600;color:var(--accent);
+  .big{font-size:clamp(48px,17vw,100px);font-weight:600;color:var(--accent);
     font-variant-numeric:tabular-nums;line-height:1}
   .sub{font-size:14px;color:var(--dim);letter-spacing:.03em}
+
+  /* results screen (after a run) */
+  #endScreen{justify-content:flex-start;overflow-y:auto;
+    padding-top:calc(env(safe-area-inset-top) + 46px);padding-bottom:36px}
+  .results{display:flex;flex-direction:column;align-items:center;gap:16px;width:min(92vw,440px)}
+  .panel{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .phead{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin-bottom:10px;text-align:left}
+  #chart svg{display:block;width:100%;height:auto}
+  .qrow{display:flex;justify-content:space-between;align-items:baseline;gap:12px;
+    padding:7px 0;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+  .qrow:last-child{border-bottom:none}
+  .qrow .q{font-size:15px;color:var(--ink)}
+  .qrow .t{font-size:14px;color:var(--warn);font-weight:600;white-space:nowrap}
+  .empty{font-size:14px;color:var(--dim);text-align:center;padding:6px 0}
+  .actions{display:flex;flex-direction:column;align-items:center;gap:14px;margin-top:2px}
   .btn{background:var(--accent);color:#05140d;border:none;border-radius:10px;
     font-family:inherit;font-size:16px;font-weight:600;letter-spacing:.02em;
     padding:14px 36px;cursor:pointer}
@@ -135,11 +150,23 @@
 <!-- END -->
 <div class="screen hidden" id="endScreen">
   <button class="cog" id="endCog" aria-label="Settings">&#9881;</button>
-  <div class="title" id="endTitle">Time</div>
-  <div class="big" id="finalScore">0</div>
-  <div class="sub" id="finalSub">0.0 per minute</div>
-  <button class="btn" id="againBtn">Go again</button>
-  <button class="linkbtn" id="changeBtn">Change mode</button>
+  <div class="results">
+    <div class="title" id="endTitle">Time</div>
+    <div class="big" id="finalScore">0</div>
+    <div class="sub" id="finalSub">0.0 per minute</div>
+    <div class="panel" id="chartPanel">
+      <div class="phead">Seconds per question</div>
+      <div id="chart"></div>
+    </div>
+    <div class="panel" id="slowPanel">
+      <div class="phead">Slowest questions</div>
+      <div id="slowest"></div>
+    </div>
+    <div class="actions">
+      <button class="btn" id="againBtn">Go again</button>
+      <button class="linkbtn" id="changeBtn">Change mode</button>
+    </div>
+  </div>
 </div>
 
 <!-- SETTINGS -->
@@ -203,6 +230,7 @@
   const rnd = (lo,hi) => Math.floor(Math.random()*(hi-lo+1))+lo;
 
   let sel=0, answer=0, score=0, running=false, startedAt=0, endAt=0, tick=null;
+  let history=[], qStart=0, runT0=0;
   const cfg = () => PRESETS[sel];
 
   /* ---- preset cards ---- */
@@ -238,6 +266,7 @@
     else{const a=rnd(c.mul.aMin,c.mul.aMax),b=rnd(c.mul.bMin,c.mul.bMax);text=`${a*b} \u00f7 ${a}`;answer=b;}
     $('problem').textContent=text;
     const a=$('answer'); a.value=''; if(running) a.focus();
+    qStart=performance.now();
   }
 
   function fmt(s){return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
@@ -247,8 +276,8 @@
     if(left<=0) finish('time');
   }
   function start(){
-    score=0; $('score').textContent='0';
-    running=true; startedAt=Date.now(); endAt=startedAt+cfg().dur*1000;
+    score=0; $('score').textContent='0'; history=[];
+    running=true; startedAt=Date.now(); runT0=performance.now(); endAt=startedAt+cfg().dur*1000;
     $('homeScreen').classList.add('hidden'); $('endScreen').classList.add('hidden');
     update(); clearInterval(tick); tick=setInterval(update,250);
     nextProblem(); $('answer').focus();
@@ -261,7 +290,50 @@
     $('endTitle').textContent = reason==='stopped' ? 'Stopped' : 'Time';
     $('finalScore').textContent=score;
     $('finalSub').textContent=rate+' per minute';
+    renderResults();
     $('endScreen').classList.remove('hidden');
+    $('endScreen').scrollTop=0;
+  }
+
+  /* ---- results: timeseries chart + slowest questions ---- */
+  function buildChart(hist, dur){
+    if(hist.length===0) return '<div class="empty">No questions solved.</div>';
+    const W=440,H=150,padL=10,padR=10,padT=14,padB=20;
+    const ys=hist.map(h=>h.dt);
+    const xMax=dur||Math.max(...hist.map(h=>h.at),1);
+    const yMax=Math.max(...ys)*1.12 || 1;
+    const X=t=>padL+(t/xMax)*(W-padL-padR);
+    const Y=v=>padT+(1-(v/yMax))*(H-padT-padB);
+    const avg=ys.reduce((a,b)=>a+b,0)/ys.length;
+    const order=[...hist.keys()].sort((a,b)=>ys[b]-ys[a]);
+    const slowSet=new Set(order.slice(0,Math.min(5,hist.length)));
+    let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Solve time per question">`;
+    s+=`<line x1="${padL}" y1="${H-padB}" x2="${W-padR}" y2="${H-padB}" stroke="#23262e" stroke-width="1"/>`;
+    s+=`<line x1="${padL}" y1="${Y(avg).toFixed(1)}" x2="${W-padR}" y2="${Y(avg).toFixed(1)}" stroke="#3a3f4a" stroke-width="1" stroke-dasharray="3 4"/>`;
+    if(hist.length>1){
+      const pts=hist.map(h=>`${X(h.at).toFixed(1)},${Y(h.dt).toFixed(1)}`).join(' ');
+      s+=`<polyline points="${pts}" fill="none" stroke="#5ee6a8" stroke-width="1.4" stroke-opacity="0.45" stroke-linejoin="round"/>`;
+    }
+    hist.forEach((h,i)=>{
+      const slow=slowSet.has(i);
+      s+=`<circle cx="${X(h.at).toFixed(1)}" cy="${Y(h.dt).toFixed(1)}" r="${slow?3.2:2}" fill="${slow?'#ff6b6b':'#5ee6a8'}"/>`;
+    });
+    s+=`<text x="${W-padR}" y="${(Y(avg)-4).toFixed(1)}" text-anchor="end" font-size="9" fill="#7d828c" font-family="ui-monospace,monospace">avg ${avg.toFixed(1)}s</text>`;
+    s+=`<text x="${padL}" y="${H-6}" font-size="9" fill="#7d828c" font-family="ui-monospace,monospace">0s</text>`;
+    s+=`<text x="${W-padR}" y="${H-6}" text-anchor="end" font-size="9" fill="#7d828c" font-family="ui-monospace,monospace">${dur}s</text>`;
+    s+=`</svg>`;
+    return s;
+  }
+  function renderResults(){
+    const has=history.length>0;
+    $('chartPanel').style.display=has?'':'none';
+    $('slowPanel').style.display=has?'':'none';
+    if(!has) return;
+    $('chart').innerHTML=buildChart(history,cfg().dur);
+    const slow=[...history].sort((a,b)=>b.dt-a.dt).slice(0,5);
+    $('slowest').innerHTML=slow.map(h=>
+      `<div class="qrow"><span class="q">${h.text} = ${h.answer}</span><span class="t">${h.dt.toFixed(2)}s</span></div>`
+    ).join('');
   }
 
   /* ---- answer input: auto-advance when correct ---- */
@@ -269,7 +341,11 @@
     if(!running) return;
     const v=e.target.value.replace(/[^0-9]/g,'');
     if(v!==e.target.value) e.target.value=v;
-    if(v!=='' && parseInt(v,10)===answer){ score++; $('score').textContent=score; nextProblem(); }
+    if(v!=='' && parseInt(v,10)===answer){
+      const now=performance.now();
+      history.push({text:$('problem').textContent, answer:answer, dt:(now-qStart)/1000, at:(now-runT0)/1000});
+      score++; $('score').textContent=score; nextProblem();
+    }
   });
 
   /* ---- settings ---- */

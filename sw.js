@@ -3,7 +3,7 @@
    refreshes it from the network in the background when online.
    Bump CACHE (v1 -> v2 ...) whenever you want clients to force-refresh. */
 
-const CACHE = 'trainer-v1';
+const CACHE = 'trainer-v2';
 
 self.addEventListener('install', e => {
   self.skipWaiting();
